@@ -1,6 +1,7 @@
 pub mod rom;
 pub mod cardano;
 pub mod persistence;
+use rand::Rng;
 pub use rom::{RomGenerationType, Rom, RomDigest};
 
 use cryptoxide::{
@@ -548,17 +549,16 @@ pub fn scavenge(
             no_pre_mine_hour: no_pre_mine_hour.clone(),
             rom: Arc::new(rom),
         };
+        let mut rng = rand::rng();
+        let start_nonce: u64 = rng.random_range(0x00..0xFF) << 16;
 
         for thread_id in 0..nb_threads_u64 {
             let params = common_params.clone();
             let sender = sender.clone();
             let stop_signal = stop_signal.clone();
 
-            // Set start_nonce = thread_id
-            let start_nonce = thread_id;
-
             s.spawn(move || {
-                spin(params, sender, stop_signal, start_nonce, step_size)
+                spin(params, sender, stop_signal, start_nonce + thread_id, step_size)
             });
         }
 

@@ -2460,6 +2460,7 @@ dependencies = [
  "pallas-codec",
  "pallas-configs",
  "pallas-crypto",
+ "rand 0.9.2",
  "rand_core 0.6.4",
  "randomx-rs",
  "regex",

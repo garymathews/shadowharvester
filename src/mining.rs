@@ -8,6 +8,7 @@ use crate::utils::{self, next_wallet_deriv_index_for_challenge, print_mining_set
 use std::fs;
 use std::sync::mpsc::Sender;
 use std::sync::atomic::Ordering;
+use rand::Rng;
 use serde_json;
 use hex;
 
@@ -508,6 +509,8 @@ pub fn spawn_miner_workers(
         let step_size = nb_threads_u64;
         let mut total_hashes_checked = 0; // Counter for total hashes processed
         let start_loop = std::time::SystemTime::now(); // Start timer here
+        let mut rng = rand::rng();
+        let start_nonce: u64 = rng.random_range(0x00..0xFF) << 16;
 
         // Spawn actual worker threads (running the core spin function)
         for thread_id in 0..nb_threads_u64 {
@@ -515,10 +518,8 @@ pub fn spawn_miner_workers(
             let sender = worker_tx.clone();
             let stop_signal = stop_signal.clone(); // Clone for each inner thread
 
-            let start_nonce = thread_id;
-
             std::thread::spawn(move || {
-                spin(params, sender, stop_signal, start_nonce, step_size)
+                spin(params, sender, stop_signal, start_nonce + thread_id, step_size)
             });
         }
         // Drop the extra sender handle here so the receiver can disconnect once all workers finish/stop
