@@ -23,6 +23,14 @@ bench = false
 harness = false
 test = false
 
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+[profile.release.package."*"]
+opt-level = 3
+
 [dependencies]
 cryptoxide = "~0.5.1"
 fmt = "0.1.0"
