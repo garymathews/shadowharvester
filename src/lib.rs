@@ -479,18 +479,10 @@ pub fn build_preimage(
     preimage
 }
 
-// Utility function to convert difficulty mask (e.g., "000FFFFF") to number of required zero bits
+// Utility function to convert 32-bit difficulty mask (e.g., "000FFFFF") to number of required zero bits
 fn difficulty_to_zero_bits(difficulty_hex: &str) -> usize {
-    let difficulty_bytes = hex::decode(difficulty_hex).unwrap();
-    let mut zero_bits = 0;
-    for &byte in difficulty_bytes.iter() {
-        if byte == 0x00 {
-            zero_bits += 8;
-        } else {
-            zero_bits += byte.leading_zeros() as usize;
-            break;
-        }
-    }
+    let difficulty = u32::from_str_radix(difficulty_hex, 16).unwrap();
+    let zero_bits = difficulty.leading_zeros() as usize;
     zero_bits
 }
 
