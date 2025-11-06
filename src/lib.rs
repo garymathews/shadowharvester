@@ -73,25 +73,34 @@ enum Op2 {
     RotR,
 }
 
-// special encoding
+static INSTR_LUT: [Instr; 256] = {
+    let mut lut = [Instr::Op3(Op3::Add); 256];
+    let mut i = 0;
+    while i <= 255 {
+        let instr = match i {
+            ..40 => Instr::Op3(Op3::Add),                      // 40
+            40..80 => Instr::Op3(Op3::Mul),                    // 40
+            80..96 => Instr::Op3(Op3::MulH),                   // 16
+            96..112 => Instr::Op3(Op3::Div),                   // 16
+            112..128 => Instr::Op3(Op3::Mod),                  // 16
+            128..138 => Instr::Op2(Op2::ISqrt),                // 10
+            138..148 => Instr::Op2(Op2::BitRev),               // 10
+            148..188 => Instr::Op3(Op3::Xor),                  // 40
+            188..204 => Instr::Op2(Op2::RotL),                 // 16
+            204..220 => Instr::Op2(Op2::RotR),                 // 16
+            220..240 => Instr::Op2(Op2::Neg),                  // 20
+            240..248 => Instr::Op3(Op3::And),                  // 8
+            248.. => Instr::Op3(Op3::Hash(i as u8 - 248)),     // 8
+        };
+        lut[i as usize] = instr;
+        i += 1;
+    }
+    lut
+};
 
 impl From<u8> for Instr {
     fn from(value: u8) -> Self {
-        match value {
-            0..40 => Instr::Op3(Op3::Add),                   // 40
-            40..80 => Instr::Op3(Op3::Mul),                  // 40
-            80..96 => Instr::Op3(Op3::MulH),                 // 16
-            96..112 => Instr::Op3(Op3::Div),                 // 16
-            112..128 => Instr::Op3(Op3::Mod),                // 16
-            128..138 => Instr::Op2(Op2::ISqrt),              // 10
-            138..148 => Instr::Op2(Op2::BitRev),             // 10
-            148..188 => Instr::Op3(Op3::Xor),                // 40
-            188..204 => Instr::Op2(Op2::RotL),               // 16
-            204..220 => Instr::Op2(Op2::RotR),               // 16
-            220..240 => Instr::Op2(Op2::Neg),                // 20
-            240..248 => Instr::Op3(Op3::And),                // 8
-            248..=255 => Instr::Op3(Op3::Hash(value - 248)), // 8
-        }
+        INSTR_LUT[value as usize]
     }
 }
 
@@ -104,16 +113,28 @@ enum Operand {
     Special2,
 }
 
+static OPERAND_LUT: [Operand; 16] = [
+    Operand::Reg,     // 0
+    Operand::Reg,     // 1
+    Operand::Reg,     // 2
+    Operand::Reg,     // 3
+    Operand::Reg,     // 4
+    Operand::Memory,  // 5
+    Operand::Memory,  // 6
+    Operand::Memory,  // 7
+    Operand::Memory,  // 8
+    Operand::Literal, // 9
+    Operand::Literal, // 10
+    Operand::Literal, // 11
+    Operand::Literal, // 12
+    Operand::Special1, // 13
+    Operand::Special2, // 14
+    Operand::Special2, // 15
+];
+
 impl From<u8> for Operand {
     fn from(value: u8) -> Self {
-        assert!(value <= 0x0f);
-        match value {
-            0..5 => Self::Reg,
-            5..9 => Self::Memory,
-            9..13 => Self::Literal,
-            13..14 => Self::Special1,
-            14.. => Self::Special2,
-        }
+        OPERAND_LUT[value as usize]
     }
 }
 
