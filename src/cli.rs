@@ -9,11 +9,11 @@ pub struct Cli {
     pub command: Option<Commands>,
 
     /// The base URL for the Scavenger Mine API (e.g., https://scavenger.gd.midnighttge.io)
-    #[arg(long)]
+    #[arg(long, default_value = "https://scavenger.prod.gd.midnighttge.io")]
     pub api_url: Option<String>,
 
     /// Accept the Token End User Agreement and continue mining without displaying the terms.
-    #[arg(long)]
+    #[arg(long, default_value_t = true)]
     pub accept_tos: bool,
 
     /// Registered Cardano address to submit solutions for.
