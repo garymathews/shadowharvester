@@ -9,6 +9,12 @@ use cryptoxide::{
     kdf::argon2,
 };
 
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
+
+#[cfg(target_arch = "aarch64")]
+use std::arch::aarch64::*;
+
 // ** Consolidated Imports required for scavenge function **
 use std::sync::mpsc::{Sender, channel};
 use std::{sync::Arc, thread, time::SystemTime};
@@ -239,6 +245,7 @@ impl Program {
         Self { instructions }
     }
 
+    #[inline]
     pub fn at(&self, i: u32) -> &[u8; INSTR_SIZE] {
         let start = (i as usize).wrapping_mul(INSTR_SIZE) % self.instructions.len();
         <&[u8; INSTR_SIZE]>::try_from(&self.instructions[start..start + INSTR_SIZE]).unwrap()
@@ -402,9 +409,8 @@ fn execute_one_instruction(vm: &mut VM, rom: &Rom) {
     vm.prog_digest.update_mut(&prog_chunk);
 }
 
+#[inline]
 pub fn hash(salt: &[u8], rom: &Rom, nb_loops: u32, nb_instrs: u32) -> [u8; 64] {
-    assert!(nb_loops >= 2);
-    assert!(nb_instrs >= 256);
     let mut vm = VM::new(&rom.digest, nb_instrs, salt);
     for _ in 0..nb_loops {
         vm.execute(rom, nb_instrs);
@@ -412,6 +418,7 @@ pub fn hash(salt: &[u8], rom: &Rom, nb_loops: u32, nb_instrs: u32) -> [u8; 64] {
     vm.finalize()
 }
 
+#[inline]
 pub fn hash_structure_good(hash: &[u8], difficulty_mask: u32) -> bool {
     let value = u32::from_be_bytes(hash[..4].try_into().unwrap());
     (value | difficulty_mask) == difficulty_mask
@@ -463,9 +470,49 @@ pub fn build_preimage(
     preimage
 }
 
-fn update_preimage_nonce(preimage_string: &mut String, nonce: u64) {
-    let nonce_str = format!("{:016x}", nonce);
-    preimage_string.replace_range(0..16, &nonce_str);
+#[inline]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+fn update_preimage_nonce(preimage_bytes: &mut [u8], nonce: u64) {
+    const HEX_CHARS: &[u8] = b"0123456789abcdef";
+    let mut n = nonce;
+    // NOTE: Since our nonce is small, only update last 8 bytes
+    for i in (8..16).rev() {
+        let nibble = (n & 0xF) as usize;
+        preimage_bytes[i] = HEX_CHARS[nibble];
+        n >>= 4;
+    }
+}
+
+#[inline]
+#[cfg(target_arch = "x86_64")]
+fn update_preimage_nonce(preimage_bytes: &mut [u8], nonce: u64) {
+    unsafe {
+        let hex_chars = _mm_loadu_si128(b"0123456789abcdef".as_ptr() as *const _);
+        let nonce_vec = _mm_loadl_epi64(nonce.to_be_bytes().as_ptr() as *const _);
+        let nibble_mask = _mm_set1_epi8(0x0F);
+        let indices_lo = _mm_and_si128(nonce_vec, nibble_mask);
+        let indices_hi = _mm_and_si128(_mm_srli_epi64(nonce_vec, 4), nibble_mask);
+        let indices = _mm_unpacklo_epi8(indices_hi, indices_lo);
+        let result_vec = _mm_shuffle_epi8(hex_chars, indices);
+        _mm_storeu_si128(preimage_bytes.as_mut_ptr() as *mut _, result_vec);
+    }
+}
+
+#[inline]
+#[cfg(target_arch = "aarch64")]
+fn update_preimage_nonce(preimage_bytes: &mut [u8], nonce: u64) {
+    unsafe {
+        let hex_chars = vld1q_u8(b"0123456789abcdef".as_ptr() as *const _);
+        let nonce_vec = vld1_u8(nonce.to_be_bytes().as_ptr() as *const _);
+        let nibble_mask = vdup_n_u8(0x0F);
+        let indices_hi = vshr_n_u8(nonce_vec, 4);
+        let indices_lo = vand_u8(nonce_vec, nibble_mask);
+        let half1 = vzip1_u8(indices_hi, indices_lo);
+        let half2 = vzip2_u8(indices_hi, indices_lo);
+        let indices = vcombine_u8(half1, half2);
+        let result_vec = vqtbl1q_u8(hex_chars, indices);
+        vst1q_u8(preimage_bytes.as_mut_ptr() as *mut _, result_vec);
+    }
 }
 
 // The worker thread function
@@ -475,7 +522,7 @@ pub fn spin(params: ChallengeParams, sender: Sender<Result>, stop_signal: Arc<At
     const NB_LOOPS: u32 = 8;
     const NB_INSTRS: u32 = 256;
 
-    let mut preimage_string = build_preimage(
+    let preimage_string = build_preimage(
         nonce_value,
         &params.address,
         &params.challenge_id,
@@ -484,10 +531,10 @@ pub fn spin(params: ChallengeParams, sender: Sender<Result>, stop_signal: Arc<At
         &params.latest_submission,
         &params.no_pre_mine_hour,
     );
+    let mut preimage_bytes = preimage_string.into_bytes();
 
     while !stop_signal.load(Ordering::Relaxed) {
-        let preimage_bytes = preimage_string.as_bytes();
-        let h = hash(preimage_bytes, &params.rom, NB_LOOPS, NB_INSTRS);
+        let h = hash(&preimage_bytes, &params.rom, NB_LOOPS, NB_INSTRS);
 
         if hash_structure_good(&h, params.difficulty_mask) {
             if sender.send(Result::Found(nonce_value, h)).is_ok() {
@@ -502,7 +549,7 @@ pub fn spin(params: ChallengeParams, sender: Sender<Result>, stop_signal: Arc<At
 
         // Increment nonce by the thread step size
         nonce_value = nonce_value.wrapping_add(step_size);
-        update_preimage_nonce(&mut preimage_string, nonce_value);
+        update_preimage_nonce(&mut preimage_bytes[0..16], nonce_value);
     }
 }
 
