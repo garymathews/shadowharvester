@@ -1,7 +1,4 @@
-use cryptoxide::{
-    hashing::blake2b::{self},
-    kdf::argon2,
-};
+use cryptoxide::{hashing::blake2b::{self}};
 
 use std::{fmt, convert::TryInto};
 
@@ -56,10 +53,94 @@ pub struct RomMixingState {
     pub current_chunk_index: usize,
     pub steps_taken: usize,
     pub max_steps: usize,
-    pub digest_ctx: blake2b::Context<512>,
+    pub digest_ctx: blake2b_simd::State,
 }
 
 // --- CORE UTILITY FUNCTIONS ---
+
+#[cfg(not(feature = "blake2b_simd_hprime"))]
+pub fn hprime(output: &mut [u8], input: &[u8]) {
+    if output.len() <= 64 {
+        blake2b::ContextDyn::new(output.len())
+            .update(&(output.len() as u32).to_le_bytes())
+            .update(&input)
+            .finalize_at(output);
+        return;
+    }
+    hprime_large(output, input);
+}
+
+#[cold]
+#[cfg(not(feature = "blake2b_simd_hprime"))]
+fn hprime_large(output: &mut [u8], input: &[u8]) {
+    let output_len = output.len();
+
+    let mut vi_prev = [0u8; 64];
+    blake2b::Context::<512>::new()
+        .update(&(output_len as u32).to_le_bytes())
+        .update(input)
+        .finalize_at(&mut vi_prev);
+    output[0..32].copy_from_slice(&vi_prev[0..32]);
+
+    let mut bytes = output_len - 32;
+    let mut pos = 32;
+
+    while bytes > 64 {
+        blake2b::Context::<512>::new()
+            .update(&vi_prev)
+            .finalize_at(&mut vi_prev);
+        output[pos..pos + 32].copy_from_slice(&vi_prev[0..32]);
+
+        bytes -= 32;
+        pos += 32;
+    }
+
+    blake2b::ContextDyn::new(bytes)
+        .update(&vi_prev)
+        .finalize_at(&mut output[pos..pos + bytes]);
+}
+
+#[cfg(feature = "blake2b_simd_hprime")]
+pub fn hprime(output: &mut [u8], input: &[u8]) {
+    let output_len = output.len();
+    if output_len <= 64 {
+        let mut state = blake2b_simd::Params::new()
+            .hash_length(output_len)
+            .to_state();
+        state.update(&(output_len as u32).to_le_bytes());
+        state.update(input);
+
+        let hash = state.finalize();
+        output.copy_from_slice(hash.as_bytes());
+        return;
+    }
+
+    let mut state = blake2b_simd::State::new();
+    state.update(&(output_len as u32).to_le_bytes());
+    state.update(input);
+    let v0_hash = state.finalize();
+
+    output[0..32].copy_from_slice(&v0_hash.as_bytes()[0..32]);
+    let mut bytes = output_len - 32;
+    let mut pos = 32;
+
+    let mut vi_prev_hash = v0_hash;
+    while bytes > 64 {
+        let mut state = blake2b_simd::State::new();
+        state.update(vi_prev_hash.as_bytes());
+        vi_prev_hash = state.finalize();
+        output[pos..pos + 32].copy_from_slice(&vi_prev_hash.as_bytes()[0..32]);
+
+        bytes -= 32;
+        pos += 32;
+    }
+
+    let mut state = blake2b_simd::State::new();
+    state.update(vi_prev_hash.as_bytes()); 
+    let final_hash = state.finalize();
+
+    output[pos..pos + bytes].copy_from_slice(&final_hash.as_bytes()[0..bytes]);
+}
 
 pub fn xorbuf(out: &mut [u8], input: &[u8]) {
     assert_eq!(out.len(), input.len());
@@ -96,12 +177,13 @@ impl Rom {
         let mut data = vec![0; size];
         let size_bytes = (data.len() as u32).to_le_bytes();
 
-        let seed = blake2b::Context::<256>::new()
-            .update(&size_bytes)
-            .update(key)
-            .finalize();
+        let mut seed = blake2b_simd::Params::new().hash_length(32).to_state();
+        seed.update(&size_bytes);
+        seed.update(key);
+        let hash = seed.finalize();
+        let hash_array = hash.as_bytes()[..32].try_into().unwrap();
 
-        let digest = random_gen(gen_type, seed, &mut data);
+        let digest = random_gen(gen_type, &hash_array, &mut data);
         Self { digest, data }
     }
 
@@ -113,41 +195,41 @@ impl Rom {
 }
 
 
-fn random_gen(gen_type: RomGenerationType, seed: [u8; 32], output: &mut [u8]) -> RomDigest {
+fn random_gen(gen_type: RomGenerationType, seed: &[u8; 32], output: &mut [u8]) -> RomDigest {
     if let RomGenerationType::TwoStep { pre_size, mixing_numbers } = gen_type {
 
         assert!(pre_size.is_power_of_two());
         let mut mixing_buffer = vec![0; pre_size];
 
         // FIX: The seed used for hprime must be a slice reference, not an array.
-        argon2::hprime(&mut mixing_buffer, &seed);
+        hprime(&mut mixing_buffer, seed);
 
         const OFFSET_LOOPS: u32 = 4;
 
         // Generate offsets_diff
         let mut offsets_diff = vec![];
         for i in 0u32..OFFSET_LOOPS {
-            let command = blake2b::Context::<512>::new()
-                .update(&seed)
+            let command = blake2b_simd::Params::new().hash_length(64).to_state()
+                .update(seed)
                 .update(b"generation offset")
                 .update(&i.to_le_bytes())
                 .finalize();
-            offsets_diff.extend(digest_to_u16s(&command.as_slice().try_into().unwrap()));
+            offsets_diff.extend(digest_to_u16s(command.as_array().try_into().unwrap()));
         }
 
         let nb_chunks_bytes = output.len() / DATASET_ACCESS_SIZE;
         let mut offsets_bytes = vec![0; nb_chunks_bytes];
 
-        let offset_bytes_input = blake2b::Context::<512>::new()
-            .update(&seed)
+        let offset_bytes_input = blake2b_simd::Params::new().hash_length(64).to_state()
+            .update(seed)
             .update(b"generation offset base")
             .finalize();
-        // FIX: Passing Vec<u8> slice reference correctly
-        argon2::hprime(&mut offsets_bytes, &offset_bytes_input);
+        let offset_bytes_input_array = offset_bytes_input.as_array();
+        hprime(&mut offsets_bytes, offset_bytes_input_array);
 
         let offsets = offsets_bytes;
 
-        let mut digest = blake2b::Context::<512>::new();
+        let mut digest = blake2b_simd::Params::new().hash_length(64).to_state();
         let nb_source_chunks = (pre_size / DATASET_ACCESS_SIZE) as u32;
 
         for (i, chunk) in output.chunks_mut(DATASET_ACCESS_SIZE).enumerate() {
@@ -166,13 +248,19 @@ fn random_gen(gen_type: RomGenerationType, seed: [u8; 32], output: &mut [u8]) ->
                 xorbuf(chunk, input);
             }
 
-            digest.update_mut(chunk);
+            digest.update(chunk);
         }
-        RomDigest(digest.finalize().as_slice().try_into().unwrap())
+        let digest_hash = digest.finalize();
+        let digest_array = digest_hash.as_array();
+        RomDigest(*digest_array)
 
     } else {
-        argon2::hprime(output, &seed);
-        RomDigest(blake2b::Context::<512>::new().update(output).finalize().as_slice().try_into().unwrap())
+        hprime(output, seed);
+        let mut digest = blake2b_simd::Params::new().hash_length(64).to_state();
+        digest.update(output);
+        let digest_hash = digest.finalize();
+        let digest_array = digest_hash.as_array();
+        RomDigest(*digest_array)
     }
 }
 
@@ -183,10 +271,11 @@ fn random_gen(gen_type: RomGenerationType, seed: [u8; 32], output: &mut [u8]) ->
 pub fn new_debug(key: &[u8], gen_type: RomGenerationType, size: usize) -> RomMixingState {
     // 1. Run V0 seed logic
     let size_bytes = (size as u32).to_le_bytes();
-    let seed_raw = blake2b::Context::<256>::new()
+    let seed_raw = blake2b_simd::Params::new().hash_length(32).to_state()
         .update(&size_bytes)
         .update(key)
         .finalize();
+    let seed_array = seed_raw.as_bytes()[..32].try_into().unwrap();
 
     // 2. Extract parameters and run HPrime
     let (pre_size, mixing_numbers) = match gen_type {
@@ -195,35 +284,35 @@ pub fn new_debug(key: &[u8], gen_type: RomGenerationType, size: usize) -> RomMix
     };
 
     let mut mixing_buffer = vec![0; pre_size];
-    let seed: [u8; 32] = seed_raw;
+    let seed: [u8; 32] = seed_array;
     let data = vec![0; size];
-    argon2::hprime(&mut mixing_buffer, &seed);
+    hprime(&mut mixing_buffer, &seed);
 
     // 3. Generate offsets_diff
     const OFFSET_LOOPS: u32 = 4;
     let mut offsets_diff = vec![];
     for i in 0u32..OFFSET_LOOPS {
-        let command = blake2b::Context::<512>::new()
+        let command = blake2b_simd::Params::new().hash_length(64).to_state()
             .update(&seed)
             .update(b"generation offset")
             .update(&i.to_le_bytes())
             .finalize();
-        offsets_diff.extend(digest_to_u16s(&command.as_slice().try_into().unwrap()));
+        offsets_diff.extend(digest_to_u16s(command.as_array().try_into().unwrap()));
     }
 
     // 4. Generate offsets_bs
     let nb_chunks_bytes = data.len() / DATASET_ACCESS_SIZE;
     let mut offsets_bs = vec![0; nb_chunks_bytes];
-    let offset_bytes_input = blake2b::Context::<512>::new()
+    let offset_bytes_input = blake2b_simd::Params::new().hash_length(64).to_state()
         .update(&seed)
         .update(b"generation offset base")
         .finalize();
-    argon2::hprime(&mut offsets_bs, &offset_bytes_input);
+    hprime(&mut offsets_bs, offset_bytes_input.as_array());
 
     let nb_source_chunks = (pre_size / DATASET_ACCESS_SIZE) as u32;
     let total_chunks = size / DATASET_ACCESS_SIZE;
 
-    let digest_ctx = blake2b::Context::<512>::new();
+    let digest_ctx = blake2b_simd::Params::new().hash_length(64).to_state();
 
     RomMixingState {
         mixing_buffer,
@@ -286,7 +375,7 @@ pub fn step_debug(state: &mut RomMixingState) -> [u8; DATASET_ACCESS_SIZE] {
         xorbuf(&mut actual_chunk, input_chunk);
     }
 
-    state.digest_ctx.update_mut(&actual_chunk);
+    state.digest_ctx.update(&actual_chunk);
 
     // 4. Update and return
     state.current_chunk_index += 1;
@@ -304,8 +393,9 @@ pub fn build_rom_from_state(mut state: RomMixingState, size: usize) -> Rom {
         rom_data_vec.extend_from_slice(&chunk);
     }
 
-    let final_digest_bytes = &state.digest_ctx.finalize();
-    let final_digest = RomDigest(final_digest_bytes.as_slice().try_into().unwrap());
+    let final_digest_hash = state.digest_ctx.finalize();
+    let final_digest_array = *final_digest_hash.as_array();
+    let final_digest = RomDigest(final_digest_array.try_into().unwrap());
 
     Rom {
         digest: final_digest,

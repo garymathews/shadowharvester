@@ -13,6 +13,11 @@ name = "shadow_harvester_lib"
 path = "src/lib.rs"
 test = true
 
+[features]
+# Enable this feature to use blake2b_simd for hprime function
+# default = ["blake2b_simd_hprime"]
+blake2b_simd_hprime = []
+
 # --- BINARY TARGET CONFIGURATION ---
 [[bin]]
 # Sets the executable name (what the user runs)
@@ -60,6 +65,7 @@ warp = "0.3"
 tokio = { version = "1", features = ["full"] }
 regex = "1.12.2"
 rand = "0.9"
+blake2b_simd = "1.0.3"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

@@ -2,12 +2,7 @@ pub mod rom;
 pub mod cardano;
 pub mod persistence;
 use rand::Rng;
-pub use rom::{RomGenerationType, Rom, RomDigest};
-
-use cryptoxide::{
-    hashing::blake2b::{self, Blake2b},
-    kdf::argon2,
-};
+pub use rom::{RomGenerationType, Rom, RomDigest, hprime};
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
@@ -39,8 +34,8 @@ struct VM {
     program: Program,
     regs: [Register; NB_REGS],
     ip: u32,
-    prog_digest: blake2b::Context<512>,
-    mem_digest: blake2b::Context<512>,
+    prog_digest: blake2b_simd::State,
+    mem_digest: blake2b_simd::State,
     prog_seed: [u8; 64],
     memory_counter: u32,
     loop_counter: u32,
@@ -149,7 +144,7 @@ impl VM {
 
         let mut init_buffer_input = rom_digest.0.to_vec();
         init_buffer_input.extend_from_slice(salt);
-        argon2::hprime(&mut init_buffer, &init_buffer_input);
+        hprime(&mut init_buffer, &init_buffer_input);
 
         let (init_buffer_regs, init_buffer_digests) = init_buffer.split_at(REGS_CONTENT_SIZE);
 
@@ -159,8 +154,10 @@ impl VM {
         }
 
         let mut digests = init_buffer_digests.chunks(DIGEST_INIT_SIZE);
-        let prog_digest = Blake2b::<512>::new().update(digests.next().unwrap());
-        let mem_digest = Blake2b::<512>::new().update(digests.next().unwrap());
+        let mut prog_digest = blake2b_simd::Params::new().hash_length(64).to_state();
+        prog_digest.update(digests.next().unwrap());
+        let mut mem_digest = blake2b_simd::Params::new().hash_length(64).to_state();
+        mem_digest.update(digests.next().unwrap());
         let prog_seed = *<&[u8; 64]>::try_from(digests.next().unwrap()).unwrap();
 
         assert_eq!(digests.next(), None);
@@ -202,13 +199,13 @@ impl VM {
             .update(&sum_regs.to_le_bytes())
             .finalize();
 
-        let mixing_value = Blake2b::<512>::new()
-            .update(&prog_value)
-            .update(&mem_value)
+        let mixing_value = blake2b_simd::Params::new().hash_length(64).to_state()
+            .update(prog_value.as_array())
+            .update(mem_value.as_array())
             .update(&self.loop_counter.to_le_bytes())
             .finalize();
         let mut mixing_out = vec![0; NB_REGS * REGISTER_SIZE * 32];
-        argon2::hprime(&mut mixing_out, &mixing_value);
+        hprime(&mut mixing_out, mixing_value.as_array());
 
         for mem_chunks in mixing_out.chunks(NB_REGS * REGISTER_SIZE) {
             for (reg, reg_chunk) in self.regs.iter_mut().zip(mem_chunks.chunks(8)) {
@@ -216,7 +213,7 @@ impl VM {
             }
         }
 
-        self.prog_seed = prog_value;
+        self.prog_seed = *prog_value.as_array();
         self.loop_counter = self.loop_counter.wrapping_add(1)
     }
 
@@ -231,14 +228,14 @@ impl VM {
     pub fn finalize(self) -> [u8; 64] {
         let prog_digest = self.prog_digest.finalize();
         let mem_digest = self.mem_digest.finalize();
-        let mut context = Blake2b::<512>::new()
-            .update(&prog_digest)
-            .update(&mem_digest)
-            .update(&self.memory_counter.to_le_bytes());
+        let mut context = blake2b_simd::Params::new().hash_length(64).to_state();
+        context.update(prog_digest.as_array());
+        context.update(mem_digest.as_array());
+        context.update(&self.memory_counter.to_le_bytes());
         for r in self.regs {
-            context.update_mut(&r.to_le_bytes());
+            context.update(&r.to_le_bytes());
         }
-        context.finalize()
+        *context.finalize().as_array()
     }
 
     #[allow(dead_code)]
@@ -273,7 +270,7 @@ impl Program {
     }
 
     pub fn shuffle(&mut self, seed: &[u8; 64]) {
-        argon2::hprime(&mut self.instructions, seed)
+        hprime(&mut self.instructions, seed)
     }
 }
 
@@ -321,7 +318,7 @@ fn execute_one_instruction(vm: &mut VM, rom: &Rom) {
     macro_rules! mem_access64 {
         ($vm:ident, $rom:ident, $addr:ident) => {{
             let mem = rom.at($addr as u32);
-            $vm.mem_digest.update_mut(mem);
+            $vm.mem_digest.update(mem);
             $vm.memory_counter = $vm.memory_counter.wrapping_add(1);
 
             // divide memory access into 8 chunks of 8 bytes
@@ -332,15 +329,17 @@ fn execute_one_instruction(vm: &mut VM, rom: &Rom) {
 
     macro_rules! special1_value64 {
         ($vm:ident) => {{
-            let r = $vm.prog_digest.clone().finalize();
-            u64::from_le_bytes(*<&[u8; 8]>::try_from(&r[0..8]).unwrap())
+            let r = $vm.prog_digest.clone();
+            let h = r.finalize();
+            u64::from_le_bytes(*<&[u8; 8]>::try_from(&h.as_array()[0..8]).unwrap())
         }};
     }
 
     macro_rules! special2_value64 {
         ($vm:ident) => {{
-            let r = $vm.mem_digest.clone().finalize();
-            u64::from_le_bytes(*<&[u8; 8]>::try_from(&r[0..8]).unwrap())
+            let r = $vm.mem_digest.clone();
+            let h = r.finalize();
+            u64::from_le_bytes(*<&[u8; 8]>::try_from(&h.as_array()[0..8]).unwrap())
         }};
     }
 
@@ -394,11 +393,11 @@ fn execute_one_instruction(vm: &mut VM, rom: &Rom) {
                 Op3::And => src1 & src2,
                 Op3::Hash(v) => {
                     assert!(v < 8);
-                    let out = Blake2b::<512>::new()
+                    let out = blake2b_simd::Params::new().hash_length(64).to_state()
                         .update(&src1.to_le_bytes())
                         .update(&src2.to_le_bytes())
                         .finalize();
-                    if let Some(chunk) = out.chunks(8).nth(v as usize) {
+                    if let Some(chunk) = out.as_array().chunks(8).nth(v as usize) {
                         u64::from_le_bytes(*<&[u8; 8]>::try_from(chunk).unwrap())
                     } else {
                         panic!("chunk doesn't exist")
@@ -427,7 +426,7 @@ fn execute_one_instruction(vm: &mut VM, rom: &Rom) {
             vm.regs[r3 as usize] = result;
         }
     }
-    vm.prog_digest.update_mut(&prog_chunk);
+    vm.prog_digest.update(&prog_chunk);
 }
 
 #[inline]
