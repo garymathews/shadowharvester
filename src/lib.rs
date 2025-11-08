@@ -14,7 +14,6 @@ use std::arch::aarch64::*;
 use std::sync::mpsc::{Sender, channel};
 use std::{sync::Arc, thread, time::SystemTime};
 use std::sync::atomic::{AtomicBool, Ordering};
-use indicatif::{ProgressBar, ProgressStyle};
 // ************************************
 
 
@@ -464,7 +463,6 @@ pub struct ChallengeParams {
 
 #[derive(Clone)]
 pub enum Result {
-    Progress(usize),
     Found(u64, [u8; 64]), // Found now returns the nonce AND the 64-byte hash
 }
 
@@ -538,7 +536,6 @@ fn update_preimage_nonce(preimage_bytes: &mut [u8], nonce: u64) {
 // The worker thread function
 pub fn spin(params: ChallengeParams, sender: Sender<Result>, stop_signal: Arc<AtomicBool>, start_nonce: u64, step_size: u64) {
     let mut nonce_value = start_nonce;
-    const CHUNKS_SIZE: usize = 0xff;
     const NB_LOOPS: u32 = 8;
     const NB_INSTRS: u32 = 256;
 
@@ -563,12 +560,8 @@ pub fn spin(params: ChallengeParams, sender: Sender<Result>, stop_signal: Arc<At
             return;
         }
 
-        if nonce_value & (CHUNKS_SIZE as u64) == 0 && sender.send(Result::Progress(CHUNKS_SIZE)).is_err() {
-             return;
-        }
-
         // Increment nonce by the thread step size
-        nonce_value = nonce_value.wrapping_add(step_size);
+        nonce_value += step_size;
         update_preimage_nonce(&mut preimage_bytes[0..16], nonce_value);
     }
 }
@@ -633,63 +626,26 @@ pub fn scavenge(
         drop(sender);
 
         let start_loop = SystemTime::now();
-        let mut pos = 0;
-        let pb = ProgressBar::new(u64::MAX);
-        pb.set_style(
-            ProgressStyle::with_template(
-                "{spinner:.green} {pos}/{len} [{elapsed_precise}] {bar:40.cyan/blue} {msg}",
-            )
-            .unwrap()
-            .progress_chars("#>-"),
-        );
-
         let mut found = Vec::new();
-        let mut should_stop_after_found = false;
 
         // Use a loop that waits for channel messages until all senders are dropped
         while let Ok(r) = receiver.recv() {
             match r {
-                Result::Progress(sz) => {
-                    if should_stop_after_found {
-                        // Ignore progress messages if we've already found a solution and are waiting for threads to exit.
-                        continue;
-                    }
-
-                    pos += sz as u64;
-                    pb.set_position(pos);
-                    let elapsed = start_loop.elapsed().unwrap().as_secs_f64();
-                    let current_speed = (pos as f64) / elapsed;
-
-                    pb.set_message(format!(
-                        "Speed: {:.2} hash/s found: {}",
-                        current_speed,
-                        found.len()
-                    ));
-                }
                 Result::Found(nonce, _h_output) => {
-                    let nonce_hex = format!("{:016x}", nonce);
-                    println!("\nFound valid nonce: {}", nonce_hex);
                     found.push(nonce);
-
                     // 🚨 Signal all worker threads to stop gracefully
                     stop_signal.store(true, Ordering::Relaxed);
-                    should_stop_after_found = true;
+
                     // The loop continues, draining any remaining messages before recv() returns Err(RecvError::Disconnected)
                 }
             }
         }
 
         // Final message after the mining stops (channel disconnects)
-        let final_nonce_hex = found.pop().map(|nonce| format!("{:016x}", nonce));
+        let final_nonce = found.pop().unwrap();
+        let final_nonce_hex = Some(format!("{:016x}", final_nonce));
         let final_elapsed = start_loop.elapsed().unwrap().as_secs_f64();
-        let final_hashes = pos;
-
-        if final_nonce_hex.is_some() {
-            let msg = format!("Scavenging complete. Found 1 solution. Total hashes checked: {}", pos);
-            pb.finish_with_message(msg);
-        } else {
-             pb.abandon_with_message("Scavenging stopped (No solution found).");
-        }
+        let final_hashes = final_nonce - start_nonce + 1;
 
         // Return the found nonce (if any) from the thread scope
         (final_nonce_hex, final_hashes, final_elapsed)

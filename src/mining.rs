@@ -507,7 +507,6 @@ pub fn spawn_miner_workers(
 
         let nb_threads_u64 = threads as u64;
         let step_size = nb_threads_u64;
-        let mut total_hashes_checked = 0; // Counter for total hashes processed
         let start_loop = std::time::SystemTime::now(); // Start timer here
         let mut rng = rand::rng();
         let start_nonce: u64 = rng.random_range(0x00..0xFF) << 16;
@@ -528,13 +527,10 @@ pub fn spawn_miner_workers(
         // Blocking loop to process results from the workers
         while let Ok(r) = worker_rx.recv() {
             match r {
-                MinerResult::Progress(sz) => {
-                    total_hashes_checked += sz as u64; // Update hash counter
-                }
                 MinerResult::Found(nonce, h_output) => { // Receive hash h_output
 
                     let elapsed_time = start_loop.elapsed().unwrap().as_secs_f64(); // Calculate elapsed time
-                    let total_hashes = total_hashes_checked + 1; // Final total hashes
+                    let total_hashes = nonce - start_nonce + 1; // Final total hashes
 
                     // A solution was found! Send it to the Challenge Manager.
                     let nonce_hex = format!("{:016x}", nonce);
