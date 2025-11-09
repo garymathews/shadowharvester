@@ -1,0 +1,75 @@
+name: Build
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+jobs:
+  build:
+    name: Build for ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Cache Dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ matrix.target }}-cargo-
+
+      - name: Build (Release)
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Get Build Path
+        id: binary_info
+        shell: pwsh
+        run: |
+          $SHA_SHORT="$(git rev-parse --short HEAD)"
+          $PROJECT_NAME="shadow-harvester"
+          $TARGET="${{ matrix.target }}"
+
+          if ($TARGET -like "*-windows-*") {
+            $EXE_NAME = "${PROJECT_NAME}.exe"
+            $BIN_PATH = "./target/${TARGET}/release/${EXE_NAME}"
+            $RELEASE_NAME = "${PROJECT_NAME}-${TARGET}-${SHA_SHORT}.exe"
+          } else {
+            $EXE_NAME = "${PROJECT_NAME}"
+            $BIN_PATH = "./target/${TARGET}/release/${EXE_NAME}"
+            $RELEASE_NAME = "${PROJECT_NAME}-${TARGET}-${SHA_SHORT}"
+          }
+          echo "BIN_PATH=$BIN_PATH" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "RELEASE_NAME=$RELEASE_NAME" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.RELEASE_NAME }}
+          path: ${{ env.BIN_PATH }}
+          retention-days: 30
