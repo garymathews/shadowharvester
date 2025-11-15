@@ -206,10 +206,10 @@ pub fn xorbuf(out: &mut [u8], input: &[u8]) {
 }
 
 // Helper function to generate a 32 u16s iterator from a digest
-pub fn digest_to_u16s(digest: &[u8; 64]) -> impl Iterator<Item = u16> {
+pub fn digest_to_u16s(digest: &[u8; 64]) -> impl Iterator<Item = u16> + '_ {
     digest
-        .chunks(2)
-        .map(|c| u16::from_le_bytes(*<&[u8; 2]>::try_from(c).unwrap()))
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
 }
 
 // --- ROM IMPLEMENTATION ---
