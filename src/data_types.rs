@@ -239,7 +239,7 @@ pub struct DataDirMnemonic<'a> {
     pub deriv_index: u32,
 }
 
-fn normalize_challenge_id(challenge_id: &str) -> Cow<str> {
+fn normalize_challenge_id(challenge_id: &str) -> Cow<'_, str> {
     #[cfg(target_os = "windows")]
     {
         // Directories with '*' are not supported on windows
