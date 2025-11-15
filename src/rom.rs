@@ -142,24 +142,66 @@ pub fn hprime(output: &mut [u8], input: &[u8]) {
     output[pos..pos + bytes].copy_from_slice(&final_hash.as_bytes()[0..bytes]);
 }
 
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 pub fn xorbuf(out: &mut [u8], input: &[u8]) {
     assert_eq!(out.len(), input.len());
     assert_eq!(out.len(), 64);
 
-    // Convert slice pointers to u64 pointers
-    let input_ptr = input.as_ptr() as *const u64;
-    let out_ptr = out.as_mut_ptr() as *mut u64;
+    for (o, i) in out.iter_mut().zip(input) {
+        *o ^= *i;
+    }
+}
+
+#[inline]
+#[cfg(target_arch = "x86_64")]
+pub fn xorbuf(out: &mut [u8], input: &[u8]) {
+    use std::arch::x86_64::*;
+
+    let out_ptr = out.as_mut_ptr();
+    let in_ptr = input.as_ptr();
 
     unsafe {
-        // FIX: Use read_unaligned and write_unaligned to prevent memory alignment panics
-        for i in 0..8 {
-            let input_word = std::ptr::read_unaligned(input_ptr.offset(i));
-            let mut out_word = std::ptr::read_unaligned(out_ptr.offset(i));
+        let v_out1 = _mm256_loadu_si256(out_ptr as *const _);
+        let v_in1 = _mm256_loadu_si256(in_ptr as *const _);
+        let v_result1 = _mm256_xor_si256(v_out1, v_in1);
+        _mm256_storeu_si256(out_ptr as *mut _, v_result1);
 
-            out_word ^= input_word;
+        let v_out2 = _mm256_loadu_si256(out_ptr.add(32) as *const _);
+        let v_in2 = _mm256_loadu_si256(in_ptr.add(32) as *const _);
+        let v_result2 = _mm256_xor_si256(v_out2, v_in2);
+        _mm256_storeu_si256(out_ptr.add(32) as *mut _, v_result2);
+    }
+}
 
-            std::ptr::write_unaligned(out_ptr.offset(i), out_word);
-        }
+#[inline]
+#[cfg(target_arch = "aarch64")]
+pub fn xorbuf(out: &mut [u8], input: &[u8]) {
+    use std::arch::aarch64::*;
+
+    let out_ptr = out.as_mut_ptr();
+    let in_ptr = input.as_ptr();
+
+    unsafe {
+        let v_out1 = vld1q_u8(out_ptr);
+        let v_in1 = vld1q_u8(in_ptr);
+        let v_result1 = veorq_u8(v_out1, v_in1);
+
+        vst1q_u8(out_ptr, v_result1);
+
+        let v_out2 = vld1q_u8(out_ptr.add(16));
+        let v_in2 = vld1q_u8(in_ptr.add(16));
+        let v_result2 = veorq_u8(v_out2, v_in2);
+        vst1q_u8(out_ptr.add(16), v_result2);
+
+        let v_out3 = vld1q_u8(out_ptr.add(32));
+        let v_in3 = vld1q_u8(in_ptr.add(32));
+        let v_result3 = veorq_u8(v_out3, v_in3);
+        vst1q_u8(out_ptr.add(32), v_result3);
+
+        let v_out4 = vld1q_u8(out_ptr.add(48));
+        let v_in4 = vld1q_u8(in_ptr.add(48));
+        let v_result4 = veorq_u8(v_out4, v_in4);
+        vst1q_u8(out_ptr.add(48), v_result4);
     }
 }
 
